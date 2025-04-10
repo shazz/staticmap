@@ -1,3 +1,21 @@
+"""
+Copyright 2015 komoot GmbH
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+
+Fork from: https://github.com/komoot/staticmap
+"""
+
 import itertools
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -5,7 +23,7 @@ from io import BytesIO
 from math import sqrt, log, tan, pi, cos, ceil, floor, atan, sinh
 
 import requests
-from PIL import Image, ImageDraw
+from PIL import Image, ImageDraw, ImageOps
 
 
 class Line:
@@ -62,7 +80,7 @@ class CircleMarker:
 
 
 class IconMarker:
-    def __init__(self, coord, file_path, offset_x, offset_y):
+    def __init__(self, coord, file_path, offset_x, offset_y, resize_w, resize_h):
         """
         :param coord:  a lon-lat pair, eg (175.0, 0.0)
         :type coord: tuple
@@ -74,7 +92,9 @@ class IconMarker:
         :type offset_y: int
         """
         self.coord = coord
-        self.img = Image.open(file_path, 'r')
+        self.img = Image.open(file_path, "r")
+        self.img.thumbnail((resize_w, resize_h), Image.Resampling.LANCZOS)
+        self.img = ImageOps.expand(self.img, border=1, fill="black")
         self.offset = (offset_x, offset_y)
 
     @property
@@ -128,7 +148,7 @@ def _lon_to_x(lon, zoom):
     if not (-180 <= lon <= 180):
         lon = (lon + 180) % 360 - 180
 
-    return ((lon + 180.) / 360) * pow(2, zoom)
+    return ((lon + 180.0) / 360) * pow(2, zoom)
 
 
 def _lat_to_y(lat, zoom):
@@ -179,8 +199,20 @@ def _simplify(points, tolerance=11):
 
 
 class StaticMap:
-    def __init__(self, width, height, padding_x=0, padding_y=0, url_template="https://a.tile.openstreetmap.org/{z}/{x}/{y}.png", tile_size=256, tile_request_timeout=None, headers={"User-Agent": "StaticMap"}, reverse_y=False, background_color="#fff",
-                 delay_between_retries=0):
+    def __init__(
+        self,
+        width,
+        height,
+        padding_x=0,
+        padding_y=0,
+        url_template="https://a.tile.openstreetmap.org/{z}/{x}/{y}.png",
+        tile_size=256,
+        tile_request_timeout=None,
+        headers={"User-Agent": "StaticMap"},
+        reverse_y=False,
+        background_color="#fff",
+        delay_between_retries=0,
+    ):
         """
         :param width: map width in pixel
         :type width: int
@@ -280,7 +312,7 @@ class StaticMap:
             self.x_center = _lon_to_x(lon_center, self.zoom)
             self.y_center = _lat_to_y(lat_center, self.zoom)
 
-        image = Image.new('RGB', (self.width, self.height), self.background_color)
+        image = Image.new("RGB", (self.width, self.height), self.background_color)
 
         self._draw_base_layer(image)
         self._draw_features(image)
@@ -311,21 +343,18 @@ class StaticMap:
             x = _lon_to_x(e[0], zoom)
             y = _lat_to_y(e[1], zoom)
 
-            extents += [(
-                _x_to_lon(x - float(e_px[0]) / self.tile_size, zoom),
-                _y_to_lat(y + float(e_px[1]) / self.tile_size, zoom),
-                _x_to_lon(x + float(e_px[2]) / self.tile_size, zoom),
-                _y_to_lat(y - float(e_px[3]) / self.tile_size, zoom)
-            )]
+            extents += [
+                (
+                    _x_to_lon(x - float(e_px[0]) / self.tile_size, zoom),
+                    _y_to_lat(y + float(e_px[1]) / self.tile_size, zoom),
+                    _x_to_lon(x + float(e_px[2]) / self.tile_size, zoom),
+                    _y_to_lat(y - float(e_px[3]) / self.tile_size, zoom),
+                )
+            ]
 
         extents += [p.extent for p in self.polygons]
 
-        return (
-            min(e[0] for e in extents),
-            min(e[1] for e in extents),
-            max(e[2] for e in extents),
-            max(e[3] for e in extents)
-        )
+        return (min(e[0] for e in extents), min(e[1] for e in extents), max(e[2] for e in extents), max(e[3] for e in extents))
 
     def _calculate_zoom(self):
         """
@@ -386,7 +415,7 @@ class StaticMap:
         for x in range(x_min, x_max):
             for y in range(y_min, y_max):
                 # x and y may have crossed the date line
-                max_tile = 2 ** self.zoom
+                max_tile = 2**self.zoom
                 tile_x = (x + max_tile) % max_tile
                 tile_y = (y + max_tile) % max_tile
 
@@ -412,10 +441,7 @@ class StaticMap:
                 raise RuntimeError("could not download {} tiles: {}".format(len(tiles), tiles))
 
             failed_tiles = []
-            futures = [
-                thread_pool.submit(self.get, tile[2], timeout=self.request_timeout, headers=self.headers)
-                for tile in tiles
-            ]
+            futures = [thread_pool.submit(self.get, tile[2], timeout=self.request_timeout, headers=self.headers) for tile in tiles]
 
             for tile, future in zip(tiles, futures):
                 x, y, url = tile
@@ -456,47 +482,39 @@ class StaticMap:
         # Pillow does not support anti aliasing for lines and circles
         # There is a trick to draw them on an image that is twice the size and resize it at the end before it gets merged with  the base layer
 
-        image_lines = Image.new('RGBA', (self.width * 2, self.height * 2), (255, 0, 0, 0))
+        image_lines = Image.new("RGBA", (self.width * 2, self.height * 2), (255, 0, 0, 0))
         draw = ImageDraw.Draw(image_lines)
 
         for line in self.lines:
-            points = [(
-                self._x_to_px(_lon_to_x(coord[0], self.zoom)) * 2,
-                self._y_to_px(_lat_to_y(coord[1], self.zoom)) * 2,
-            ) for coord in line.coords]
+            points = [
+                (
+                    self._x_to_px(_lon_to_x(coord[0], self.zoom)) * 2,
+                    self._y_to_px(_lat_to_y(coord[1], self.zoom)) * 2,
+                )
+                for coord in line.coords
+            ]
 
             if line.simplify:
                 points = _simplify(points)
 
             for point in points:
                 # draw extra points to make the connection between lines look nice
-                draw.ellipse((
-                    point[0] - line.width + 1,
-                    point[1] - line.width + 1,
-                    point[0] + line.width - 1,
-                    point[1] + line.width - 1
-                ), fill=line.color)
+                draw.ellipse((point[0] - line.width + 1, point[1] - line.width + 1, point[0] + line.width - 1, point[1] + line.width - 1), fill=line.color)
 
             draw.line(points, fill=line.color, width=line.width * 2)
 
         for circle in filter(lambda m: isinstance(m, CircleMarker), self.markers):
-            point = [
-                self._x_to_px(_lon_to_x(circle.coord[0], self.zoom)) * 2,
-                self._y_to_px(_lat_to_y(circle.coord[1], self.zoom)) * 2
-            ]
-            draw.ellipse((
-                point[0] - circle.width,
-                point[1] - circle.width,
-                point[0] + circle.width,
-                point[1] + circle.width
-            ), fill=circle.color)
+            point = [self._x_to_px(_lon_to_x(circle.coord[0], self.zoom)) * 2, self._y_to_px(_lat_to_y(circle.coord[1], self.zoom)) * 2]
+            draw.ellipse((point[0] - circle.width, point[1] - circle.width, point[0] + circle.width, point[1] + circle.width), fill=circle.color)
 
         for polygon in self.polygons:
-            points = [(
-                self._x_to_px(_lon_to_x(coord[0], self.zoom)) * 2,
-                self._y_to_px(_lat_to_y(coord[1], self.zoom)) * 2,
-
-            ) for coord in polygon.coords]
+            points = [
+                (
+                    self._x_to_px(_lon_to_x(coord[0], self.zoom)) * 2,
+                    self._y_to_px(_lat_to_y(coord[1], self.zoom)) * 2,
+                )
+                for coord in polygon.coords
+            ]
             if polygon.simplify:
                 points = _simplify(points)
 
@@ -512,14 +530,6 @@ class StaticMap:
         for icon in filter(lambda m: isinstance(m, IconMarker), self.markers):
             position = (
                 self._x_to_px(_lon_to_x(icon.coord[0], self.zoom)) - icon.offset[0],
-                self._y_to_px(_lat_to_y(icon.coord[1], self.zoom)) - icon.offset[1]
+                self._y_to_px(_lat_to_y(icon.coord[1], self.zoom)) - icon.offset[1],
             )
-            image.paste(icon.img, position, icon.img)
-
-
-if __name__ == '__main__':
-    map = StaticMap(300, 400, 10)
-    line = Line([(13.4, 52.5), (2.3, 48.9)], 'blue', 3)
-    map.add_line(line)
-    image = map.render()
-    image.save('berlin_paris.png')
+            image.paste(icon.img, position)
